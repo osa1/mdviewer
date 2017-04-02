@@ -1,9 +1,4 @@
-{-# LANGUAGE ViewPatterns #-}
 module Main (main) where
-
-import Data.Char
-import Data.Maybe
-import Data.Map.Strict (Map, fromList, member, insert)
 
 import System.Environment
 import System.Directory
@@ -11,7 +6,6 @@ import System.FilePath
 
 import Control.Exception
 --import Control.Monad
-import Control.Conditional
 
 import Types
 import Command
@@ -20,70 +14,55 @@ import Convert
 import List
 import Paths
 
-aboutStyle = "markdown"
-
-
-getStyleName :: FilePath -> String
-getStyleName = map toLower . takeBaseName
-
-loadStyles :: IO Styles
-loadStyles = do
-    stylesPath <- getStylesPath
-    whenM (not <$> doesPathExist stylesPath) 
-        (error $ "error loading style files from " ++ show stylesPath)
-    
-    files <- listDirectory stylesPath
-    let styles = filter ((== ".css") . takeExtension) files
-        names = map getStyleName styles
-        paths = map (stylesPath </>) styles
-    return $ fromList (zip names paths)
-
-
-printException :: SomeException -> IO ()
-printException e = do
-    exe <- getProgName
-    putStrLn $ exe ++ ": " ++ show e
-
-
 dispatcher :: Styles -> Command -> IO ()
 dispatcher styles List = runList styles
-dispatcher styles cmd = do
-    (cmd', styles') <- sanitizeStyle cmd styles 
-    case cmd' of
-        Convert {} -> runConvert cmd' styles'
-        Show {input = ""} -> do
-                about <- getAboutFile
-                runShow (cmd'{input = about, style = Just aboutStyle}) styles'
-        Show {} -> runShow cmd' styles'        
+dispatcher styles (Show "" _) = do
+    about <- getAboutFile
+    runShow styles (Just (Style "markdown")) about
+dispatcher styles (Show input mb_style) = do
+    (mb_style', styles') <- sanitizeStyle mb_style styles
+    runShow styles' mb_style' input
+dispatcher styles (Convert input mb_output mb_style) = do
+    (mb_style', _) <- sanitizeStyle mb_style styles
+    runConvert mb_style' input mb_output
 
-
-sanitizeStyle :: Command -> Styles -> IO (Command, Styles) 
-sanitizeStyle cmd@(style -> Nothing) styles = return (cmd, styles)
-sanitizeStyle cmd@(style -> Just st) styles = 
-    if st `member` styles 
-    then do
-        putStrLn $ "Using built-in style: " ++ st
-        return (cmd, styles)
-    else do 
-        fileExists <- doesFileExist st
-        let isCSS = takeExtension st == ".css"
-        if fileExists && isCSS 
-            then do 
-                stylesPath <- getStylesPath
-                let stName = getStyleName st
-                    copyPath = stylesPath </> st
-                putStrLn $ "Using external style from "++ st ++" as " ++ stName 
-                copyFile st copyPath
-                putStrLn $ "External style copied to " ++ copyPath
-                return (cmd{style = Just stName}, insert stName st styles)
-            else do 
-                putStrLn $ "Provided style is not built-in nor a valid CSS\
-                            \ file. Using pure HTML instead"
-                return (cmd {style = Nothing}, styles)
-
+sanitizeStyle
+    :: Maybe String
+         -- ^ A file path to a .css to be used as style, or a built-in style
+         -- name.
+    -> Styles
+         -- ^ Style index
+    -> IO (Maybe Style, Styles)
+sanitizeStyle Nothing   sts
+  = return (Nothing, sts)
+sanitizeStyle (Just st) sts
+  | Style st `elem` styleList sts
+  = do putStrLn $ "Using built-in style: " ++ st
+       return (Just (Style st), sts)
+  | otherwise
+  = do fileExists <- doesFileExist st
+       let isCSS = takeExtension st == ".css"
+       if fileExists && isCSS
+         then do
+           stylesPath <- getStylesPath
+           let stName   = takeBaseName st
+               copyPath = stylesPath </> stName <.> "css"
+           putStrLn $ "Using external style from "++ st ++" as " ++ stName
+           copyFile st copyPath
+           putStrLn $ "External style copied to " ++ copyPath
+           return (Just (Style st), addStyle (Style st) sts)
+         else do
+           putStrLn $ "Provided style is not built-in nor a valid CSS\
+                       \ file. Using pure HTML instead"
+           return (Nothing, sts)
 
 main :: IO ()
 main = handle printException $ do
     command <- parseCommand
     styles <- loadStyles
     runApp command (dispatcher styles)
+  where
+    printException :: SomeException -> IO ()
+    printException e = do
+        exe <- getProgName
+        putStrLn $ exe ++ ": " ++ show e

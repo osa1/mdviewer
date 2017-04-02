@@ -3,6 +3,8 @@ module Paths where
 import System.Directory
 import System.FilePath
 
+progName, aboutFile, dataRelPath, stylesRelPath :: FilePath
+
 progName = "mdviewer"
 
 aboutFile = "about.md"

@@ -10,17 +10,13 @@ import System.Exit
 import Types
 import HtmlBuilder
 
-
-errorMessage :: IO ()
-errorMessage = die "ABORTING!"
-
-runConvert :: Command -> Styles ->  IO ()
-runConvert cmd styles = do
-    
-    result <- renderContents (input cmd) (styles @> cmd)
+runConvert :: Maybe Style -> FilePath -> Maybe FilePath -> IO ()
+runConvert mb_style input mb_output = do
+    mb_style_path <- mapM stylePath mb_style
+    result <- renderContents input mb_style_path
     case result of
-        Nothing -> errorMessage
+        Nothing   -> die "ABORTING!"
         Just html -> do
-            writeFile output html 
-                where output | usesOutput cmd = getOutput cmd
-                             | otherwise      = input cmd -<.> "html"
+            writeFile output html
+                where output | Just output <- mb_output = output
+                             | otherwise                = input -<.> "html"

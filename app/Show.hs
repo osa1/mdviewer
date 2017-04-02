@@ -6,20 +6,18 @@ module Show (runShow) where
 import Prelude hiding (writeFile)
 
 import Data.Maybe
-import Data.List (elemIndex, null)
+import Data.List (elemIndex)
 
 import System.FilePath
 import System.Exit
 
-import Control.Exception
-import Control.Concurrent
 import Control.Conditional
-import Control.Monad (void) 
+import Control.Monad (void)
 import Control.Monad.IO.Class
+import Data.IORef
 
-import Graphics.UI.Gtk 
+import Graphics.UI.Gtk hiding (Style)
 import Graphics.UI.Gtk.WebKit.WebView
-import Graphics.UI.Gtk.Windows.Window
 
 import Text.Pandoc.UTF8 (writeFile)
 
@@ -27,39 +25,39 @@ import Types
 import HtmlBuilder
 
 
-offsetStyleFrom :: Int -> Command -> Styles -> Command
-offsetStyleFrom offset cmd styles = cmd { style = offsetStyle }
-    where stylesQueue = Nothing : map Just (listStyles styles)
-          currIndex = fromJust $ elemIndex (style cmd) stylesQueue
-          offsetIndex = (currIndex + offset) `mod` (length stylesQueue - 1) 
-          offsetStyle = stylesQueue !! offsetIndex
+offsetStyleFrom :: Int -> Styles -> Maybe Style -> Style
+offsetStyleFrom offset ss mb_s =
+    style_list !! (s_idx `mod` length style_list)
+  where
+    style_list = styleList ss
+    s_idx
+      | Just s <- mb_s
+      = fromJust (elemIndex s style_list) + offset
+      | otherwise
+      = offset
 
-nextStyleFrom :: Command -> Styles -> Command
+nextStyleFrom :: Styles -> Maybe Style -> Style
 nextStyleFrom = offsetStyleFrom 1
 
-prevStyleFrom :: Command -> Styles -> Command
+prevStyleFrom :: Styles -> Maybe Style -> Style
 prevStyleFrom = offsetStyleFrom (-1)
-
-
-setInputFile :: Command -> FilePath -> Command
-setInputFile cmd path = cmd { input = path } 
 
 
 setContent :: WebView -> String -> IO ()
 setContent webview html = webViewLoadString webview html Nothing ""
 
 
-makeTitle :: Command -> String
-makeTitle cmd = status ++ "  -  Markdown Viewer" 
-    where status | usesStyle cmd = input cmd ++ "@" ++ fromJust (style cmd)
-                 | otherwise     = input cmd
+makeTitle :: String -> Maybe FilePath -> String
+makeTitle input mb_style = status ++ "  -  Markdown Viewer"
+    where status | Just style <- mb_style = input ++ "@" ++ style
+                 | otherwise              = input
 
 
 genericDialogNew :: String -> Window -> IO FileChooserDialog
-genericDialogNew action window = fileChooserDialogNew  
-    (Just action) (Just window) 
-    FileChooserActionSave 
-    [ (action, ResponseAccept) 
+genericDialogNew action window = fileChooserDialogNew
+    (Just action) (Just window)
+    FileChooserActionSave
+    [ (action, ResponseAccept)
     , ("Cancel", ResponseCancel) ]
 
 
@@ -69,7 +67,7 @@ openDialogNew = genericDialogNew "Open"
 
 
 whenReturnFilename :: FileChooserDialog -> (FilePath -> IO ()) -> IO ()
-whenReturnFilename dialog action = do 
+whenReturnFilename dialog action = do
     response <- dialogRun dialog
     case response of
         ResponseAccept -> do
@@ -81,40 +79,39 @@ whenReturnFilename dialog action = do
 
 
 abortDialog :: Window ->  IO ()
-abortDialog window = do 
-    dialog <- messageDialogNew (Just window) [] MessageError ButtonsOk 
+abortDialog window = do
+    dialog <- messageDialogNew (Just window) [] MessageError ButtonsOk
                 ("An internal error happened. Aborting" :: String)
     _ <- dialogRun dialog
-    widgetDestroy dialog    
+    widgetDestroy dialog
     exitFailure
 
 invalidFileDialog :: Window -> String -> IO ()
 invalidFileDialog window path = do
-    dialog <- messageDialogNew (Just window) [] MessageError ButtonsOk 
+    dialog <- messageDialogNew (Just window) [] MessageError ButtonsOk
                 ("Unable to load " ++ path)
     _ <- dialogRun dialog
-    widgetDestroy dialog    
+    widgetDestroy dialog
 
-
-runShow :: Command -> Styles -> IO ()
-runShow cmd styles = do
-    
+runShow :: Styles -> Maybe Style -> FilePath -> IO ()
+runShow styles style0 input0 = do
     -- Create an "global" state that keeps the style and the current file
     -- displayed between different events handles
-    status <- newMVar cmd
-    fullscreen <- newMVar False
-    lastPos <- newEmptyMVar
+    style <- newIORef style0
+    input <- newIORef input0
+    fullscreen <- newIORef False
+    lastPos <- newIORef Nothing
 
     -- Initialize the GUI
     void initGUI
-    
+
     -- Create the widgets
     window <- windowNew
     scrolled <- scrolledWindowNew Nothing Nothing
     webview <- webViewNew
-    
+
     -- Set widgets default attributes
-    window `set` [ windowTitle          := makeTitle cmd
+    window `set` [ windowTitle          := makeTitle input0 (fmap styleName style0)
                  , windowResizable      := True
                  , windowWindowPosition := WinPosCenter
                  , windowDefaultWidth   := 640
@@ -122,177 +119,172 @@ runShow cmd styles = do
                  , containerChild       := scrolled ]
 
     scrolled `set` [ containerChild := webview ]
-    
-    result <- renderContents (input cmd) (styles @> cmd)
-    maybe (invalidFileDialog window (input cmd) >> exitFailure) 
-          (setContent webview) result
 
-    
+    do
+      style0_path <- mapM stylePath style0
+      result <- renderContents input0 style0_path
+      maybe (invalidFileDialog window input0 >> exitFailure)
+            (setContent webview) result
+
     -- Handle events
-    window `on` deleteEvent $ liftIO mainQuit >> return False
+    _ <- window `on` deleteEvent $ liftIO mainQuit >> return False
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "F11" <- eventKeyName
-        liftIO $ do 
-            isFullscreen <- readMVar fullscreen
+        liftIO $ do
+            isFullscreen <- readIORef fullscreen
+            writeIORef fullscreen (not isFullscreen)
             if isFullscreen
-                then do
-                    modifyMVar_ fullscreen (return . not) 
-                    windowUnfullscreen window
-                else do
-                    modifyMVar_ fullscreen (return . not) 
-                    windowFullscreen window
+                then windowUnfullscreen window
+                else windowFullscreen window
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "q" <- eventKeyName
         liftIO $ mainQuit >> exitSuccess
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "r" <- eventKeyName
-        liftIO $ do 
-            
+        liftIO $ do
+
             uri <- webViewGetUri webview
             let isInputFile = maybe False (==[]) uri
-            
+
             when isInputFile $ do
                 adj <- scrolledWindowGetVAdjustment scrolled
-                pos <- adjustmentGetValue adj 
-                putMVar lastPos pos 
-                
+                pos <- adjustmentGetValue adj
+                writeIORef lastPos (Just pos)
 
-            cmd' <- readMVar status 
-            result <- renderContents (input cmd') (styles @> cmd')
+
+            style' <- readIORef style >>= mapM stylePath
+            input' <- readIORef input
+            result <- renderContents input' style'
             maybe (abortDialog window) (setContent webview) result
-    
-    webview `after` loadFinished $ \_ ->  do
+
+    _ <- webview `after` loadFinished $ \_ ->  do
         liftIO $ do
-            pos <- tryTakeMVar lastPos
-            when (isJust pos) $ do 
+            pos <- readIORef lastPos
+            when (isJust pos) $ do
                 adj <- scrolledWindowGetVAdjustment scrolled
                 adjustmentSetValue adj (fromJust pos)
-                adjustmentValueChanged adj            
-    
-    window `on` keyPressEvent $ tryEvent $ do
+                adjustmentValueChanged adj
+
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "j" <- eventKeyName
-        liftIO $ do 
+        liftIO $ do
             adj <- scrolledWindowGetVAdjustment scrolled
             ps <- adjustmentGetStepIncrement adj
             pos <- adjustmentGetValue adj
             adjustmentSetValue adj (pos + ps)
             adjustmentValueChanged adj
-    
-    window `on` keyPressEvent $ tryEvent $ do
+
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "k" <- eventKeyName
-        liftIO $ do 
+        liftIO $ do
             adj <- scrolledWindowGetVAdjustment scrolled
             ps <- adjustmentGetStepIncrement adj
             pos <- adjustmentGetValue adj
             adjustmentSetValue adj (pos - ps)
             adjustmentValueChanged adj
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "g" <- eventKeyName
-        liftIO $ do 
+        liftIO $ do
             adj <- scrolledWindowGetVAdjustment scrolled
             top <- adjustmentGetLower adj
             adjustmentSetValue adj top
-            adjustmentValueChanged adj            
-    
-    window `on` keyPressEvent $ tryEvent $ do
+            adjustmentValueChanged adj
+
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "G" <- eventKeyName
-        liftIO $ do 
+        liftIO $ do
             adj <- scrolledWindowGetVAdjustment scrolled
             bottom <- adjustmentGetUpper adj
             adjustmentSetValue adj bottom
-            adjustmentValueChanged adj            
+            adjustmentValueChanged adj
 
-    
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "z" <- eventKeyName
-        liftIO $ do 
+        liftIO $ do
             canGoBack <- webViewCanGoBack webview
-            if canGoBack 
-                then webViewGoBack webview 
+            if canGoBack
+                then webViewGoBack webview
                 else do
-                    cmd' <- readMVar status 
-                    result <- renderContents (input cmd') (styles @> cmd')
+                    input' <- readIORef input
+                    style' <- readIORef style >>= mapM stylePath
+                    result <- renderContents input' style'
                     maybe (abortDialog window) (setContent webview) result
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "x" <- eventKeyName
-        liftIO $ do 
+        liftIO $ do
             canGoForward <- webViewCanGoForward webview
             when (canGoForward) (webViewGoForward webview)
 
-
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "n" <- eventKeyName
         liftIO $ do
-            cmd' <- modifyMVar status $ \cmd -> do
-                let cmd' = cmd `nextStyleFrom` styles 
-                return (cmd', cmd')
-            result <- renderContents (input cmd') (styles @> cmd')
+            modifyIORef style (Just . nextStyleFrom styles)
+            style' <- readIORef style
+            input' <- readIORef input
+            result <- mapM stylePath style' >>= renderContents input'
             maybe (abortDialog window) (setContent webview) result
-            window `set` [ windowTitle := makeTitle cmd' ]
+            window `set` [ windowTitle := makeTitle input' (styleName <$> style') ]
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "N" <- eventKeyName
         liftIO $ do
-            cmd' <- modifyMVar status $ \cmd -> do
-                let cmd' = cmd `prevStyleFrom` styles 
-                return (cmd', cmd')
-            result <- renderContents (input cmd') (styles @> cmd')
+            modifyIORef style (Just . prevStyleFrom styles)
+            style' <- readIORef style
+            input' <- readIORef input
+            result <- mapM stylePath style' >>= renderContents input'
             maybe (abortDialog window) (setContent webview) result
-            window `set` [ windowTitle := makeTitle cmd' ]
-   
-    window `on` keyPressEvent $ tryEvent $ do
+            window `set` [ windowTitle := makeTitle input' (styleName <$> style') ]
+
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "e" <- eventKeyName
         liftIO $ do
-            
+
             dialog <- openDialogNew window
             filter <- fileFilterNew
             fileFilterAddMimeType filter ("text/plain" :: String)
             fileChooserAddFilter dialog filter
             widgetShow dialog
             dialog `whenReturnFilename` \path -> do
-                
                 putStrLn $ "Opening file from " ++ path
-                cmd' <- modifyMVar status $ \cmd -> do
-                    let cmd' = setInputFile cmd path
-                    return (cmd', cmd')
-                result <- renderContents (input cmd') (styles @> cmd')
-                case result of 
-                    Nothing -> invalidFileDialog window path 
-                    Just html' -> do 
+                writeIORef input path
+                style' <- readIORef style
+                result <- mapM stylePath style' >>= renderContents path
+                case result of
+                    Nothing -> invalidFileDialog window path
+                    Just html' -> do
                         webview `setContent` html'
-                        window `set` [ windowTitle := makeTitle cmd' ]
-            
+                        window `set` [ windowTitle := makeTitle path (styleName <$> style') ]
+
             widgetDestroy dialog
 
-    window `on` keyPressEvent $ tryEvent $ do
+    _ <- window `on` keyPressEvent $ tryEvent $ do
         "w" <- eventKeyName
         liftIO $ do
-            
+
             dialog <- saveDialogNew window
             widgetShow dialog
             dialog `whenReturnFilename` \path -> do
-                
-                cmd' <- readMVar status
-                result <- renderContents (input cmd') (styles @> cmd')
+
+                input' <- readIORef input
+                style' <- readIORef style
+                result <- mapM stylePath style' >>= renderContents input'
                 maybe (abortDialog window) (\html' -> do
-                
+
                     let path' = if hasExtension path
                                 then path
                                 else path <.> "html"
-                
+
                     putStrLn $ "Saving html file to " ++ path'
-                    writeFile path' html' 
+                    writeFile path' html'
                     ) result
-            
+
             widgetDestroy dialog
-   
-    
+
     -- Start the GUI main loop
     widgetShowAll window
     mainGUI
-

@@ -1,14 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module HtmlBuilder where
+module HtmlBuilder (renderContents) where
 
 import Prelude hiding (putStrLn, readFile, writeFile, head)
 
 import Control.Exception
-import Control.DeepSeq
 
 import Text.Blaze.Html5
-import Text.Blaze.Html5.Attributes (charset, rel, type_, href)
+import Text.Blaze.Html5.Attributes (charset, type_)
 import Text.Blaze.Html.Renderer.String
 
 import Text.Pandoc.Readers.Markdown
@@ -16,20 +15,17 @@ import Text.Pandoc.Writers.HTML
 import Text.Pandoc.Options
 import Text.Pandoc.UTF8
 
-
-returnNothing :: SomeException -> IO (Maybe String)
-returnNothing e = do
-    putStrLn $ "renderContents: exception raised\n" ++ displayException e
-    return Nothing
-
-
 renderContents :: FilePath -> Maybe FilePath -> IO (Maybe String)
 renderContents input style = handle returnNothing $ do
     html <- case style of
         Nothing  -> toPureHtmlString input
         Just css -> toStylishedHtmlString css input
-    return $!! Just html
-
+    return (Just html)
+  where
+    returnNothing :: SomeException -> IO (Maybe String)
+    returnNothing e = do
+        putStrLn $ "renderContents: exception raised\n" ++ displayException e
+        return Nothing
 
 toPureHtmlString :: FilePath -> IO String
 toPureHtmlString input = pureHtmlString <$> readFile input

@@ -1,25 +1,39 @@
 module Types where
 
-import qualified Data.Map.Strict as Map
-
+import Control.Conditional (unlessM)
 import Data.Maybe
+import System.Directory
+import System.FilePath
 
--- | Built-in styles
-type Styles = Map.Map String FilePath
+import Paths
 
-(@>) :: Styles -> Command -> Maybe FilePath
-styles @> cmd = do
-    st <- style cmd
-    Map.lookup st styles 
+newtype Style = Style { styleName :: String }
+  deriving (Eq)
 
+-- | Styles live in `stylesPath`. Use `stylePath` to get the full path.
+newtype Styles = Styles { styleList :: [Style] }
 
-listStyles :: Styles -> [String]
-listStyles = Map.keys
+addStyle :: Style -> Styles -> Styles
+addStyle s (Styles ss) = Styles (s : ss)
 
+-- | Convert a style name to full .css path.
+stylePath :: Style -> IO FilePath
+stylePath (Style style) = do
+    styles_path <- getStylesPath
+    return (styles_path </> style <.> "css")
 
--- | Supported commands and parameters 
+loadStyles :: IO Styles
+loadStyles = do
+    stylesPath <- getStylesPath
+    unlessM (doesPathExist stylesPath)
+            (error ("error loading style files from " ++ show stylesPath))
+    files <- listDirectory stylesPath
+    let styles = filter ((== ".css") . takeExtension) files
+    return (Styles (map (Style . takeBaseName) styles))
+
+-- | Supported commands and parameters
 data Command
-    = Show   
+    = Show
         { input :: FilePath
         , style :: Maybe String }
     | Convert
@@ -29,16 +43,8 @@ data Command
     | List
     deriving (Show)
 
-
--- | Command helpers
-usesStyle :: Command -> Bool
-usesStyle = isJust . style
-
 usesOutput :: Command -> Bool
 usesOutput = isJust . output
-
-getStyle :: Command -> String
-getStyle = fromJust . style
 
 getOutput :: Command -> String
 getOutput = fromJust . output
