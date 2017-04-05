@@ -1,10 +1,11 @@
 module Main (main) where
 
-import System.Environment
-import System.Directory
-import System.FilePath
-
 import Control.Exception
+import Control.Monad
+import System.Directory
+import System.Environment
+import System.FilePath
+import System.Posix.Process (forkProcess)
 
 import Types
 import Command
@@ -17,10 +18,10 @@ dispatcher :: Styles -> Command -> IO ()
 dispatcher styles List = runList styles
 dispatcher styles (Show "" _) = do
     about <- getAboutFile
-    runShow styles (Just (Style "markdown")) about
+    void $ forkProcess $ runShow styles (Just (Style "markdown")) about
 dispatcher styles (Show input mb_style) = do
     (mb_style', styles') <- sanitizeStyle mb_style styles
-    runShow styles' mb_style' input
+    void $ forkProcess $ runShow styles' mb_style' input
 dispatcher styles (Convert input mb_output mb_style) = do
     (mb_style', _) <- sanitizeStyle mb_style styles
     runConvert mb_style' input mb_output

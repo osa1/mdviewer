@@ -44,6 +44,7 @@ executable mdviewer
     pandoc-types,
     text,
     transformers,
+    unix,
     webkitgtk3
 
   default-language:    Haskell2010
